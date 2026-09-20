@@ -35,20 +35,6 @@ Se utiliza el **Bank Account Fraud (BAF) Dataset Suite** (Jesus et al., NeurIPS 
 9. **Undersampling:** se comparó el modelo original contra uno entrenado con clases balanceadas 50/50.
 
 
-## Estructura del repositorio
-
-```
-.
-├── README.md
-├── data/
-│   └── Base.csv              # no incluido (descargar de Kaggle)
-├── R/
-│   └── trabajo_practico.R    # script completo del análisis
-├── images/                   # gráficos usados en el informe
-└── informe/
-    └── informe.tex           # informe en LaTeX
-```
-
 ## Requisitos
 
 - R (>= 4.1)
