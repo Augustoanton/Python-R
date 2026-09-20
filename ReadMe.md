@@ -34,17 +34,6 @@ Se utiliza el **Bank Account Fraud (BAF) Dataset Suite** (Jesus et al., NeurIPS 
 8. **Umbral de clasificación:** dado el desbalance, el umbral clásico de 0,5 clasifica casi todo como no fraude. Se buscó el umbral que maximiza el F1 (0,11).
 9. **Undersampling:** se comparó el modelo original contra uno entrenado con clases balanceadas 50/50.
 
-## Resultados
-
-Completá esta sección con los valores que obtengas al correr el script:
-
-| Métrica | Modelo original | Undersampling |
-|---|---|---|
-| AUC ROC | _completar_ | _completar_ |
-| AUC PR | _completar_ | — |
-| F1 (umbral 0,11) | _completar_ | — |
-
-El undersampling mejoró el AUC apenas en 0,001 respecto del modelo original.
 
 ## Estructura del repositorio
 
@@ -85,6 +74,3 @@ install.packages(c("tidyverse", "patchwork", "scorecard",
 ```
 4. El script usa la semilla `261395`, por lo que el split y los resultados son reproducibles.
 
-## Referencias
-
-- Jesus, S., Pombal, J., Alves, D., Cruz, A., Saleiro, P., Ribeiro, R., Gama, J., Bizarro, P. (2022). *Turning the Tables: Biased, Imbalanced, Dynamic Tabular Datasets for ML Evaluation*. NeurIPS 2022 Datasets and Benchmarks Track.
