@@ -17,7 +17,7 @@ library(scorecard)
 
 #################################################################
 #Primeramente importo la base de datos:
-df <-  read.csv('C:/Users/aanto/OneDrive/Desktop/R folder/Base.csv')
+df <-  read.csv('./Base.csv')
 #Reviso si existen valores nulos en el dataframe:
 colSums(is.na(df))
 
