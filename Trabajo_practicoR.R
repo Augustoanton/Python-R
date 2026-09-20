@@ -1,0 +1,598 @@
+#################################################################
+# LABORATORIO DE PROGRAMACIÓN EN PYTHON Y R
+# Maestría en Econometría - UTDT
+#Trabajo Practico
+#################################################################
+rm(list = ls())
+library(patchwork)
+library(tidyverse)
+library(glmnet)
+library(ISLR2)
+library(pROC)
+library(rsample)
+library(PRROC)
+library(class)
+library(dplyr)
+library(scorecard)
+
+#################################################################
+#Primeramente importo la base de datos:
+df <-  read.csv('C:/Users/aanto/OneDrive/Desktop/R folder/Base.csv')
+#Reviso si existen valores nulos en el dataframe:
+colSums(is.na(df))
+
+#Columnas:
+names(df)
+
+## Tabla resumen de tipos de variable
+tipos <- data.frame(
+  variable = names(df),
+  tipo = sapply(df, class) #Me dice el tipo de variable
+) %>% count(tipo, name = "cantidad_variables")
+print(tipos)
+
+## Cobertura temporal: el dataset cubre 8 "meses" simulados (0 a 7),
+## pensados para estudiar concept drift, no fechas calendario reales
+ggplot(df, aes(x = factor(month))) +
+  geom_bar(fill = "steelblue") +
+  geom_text(stat = "count", aes(label = ..count..), vjust = 1.5, size = 3.5, color = 'white') +
+  labs(title = "Cobertura temporal del dataset",
+       subtitle = "8 meses simulados (0-7); el volumen no es uniforme entre meses",
+       x = "Mes simulado", y = "Cantidad de solicitudes") +
+  theme_classic()
+
+
+#Quiero visualizar primeramente el desbalance de los datos:\
+
+balance <- as.data.frame(table(datos_na$fraud_bool))
+
+names(balance) <- c('Fraude', 'Cantidad')
+print(balance)
+
+#Grafico la distribucion de clases:
+
+ggplot(
+  balance,
+  aes(
+    x = Fraude,
+    y = Cantidad
+  )
+) +
+  
+  geom_col(fill = c("#4C72B0", "#C44E52"))+
+  geom_text(
+    aes(
+      label = Cantidad
+    ),
+    vjust = -0.4,
+    size = 4
+  ) +
+  
+  labs(
+    title = "Fraude: distribución de las clases",
+    subtitle = "La clase Fraudulenta es mucho menos frecuente",
+    x = "Fraude",
+    y = "Cantidad de observaciones"
+  ) +
+  
+  theme_minimal(base_size = 10)
+# ============================================================
+##  VALORES FALTANTES
+## ============================================================
+## Varias variables numericas codifican "faltante" con -1 en vez de NA
+## (decision de los autores del dataset, documentada). Las recodificamos
+## ANTES de medir valores faltantes.
+
+vars_missing_como_negativo <- c(
+  "prev_address_months_count", "current_address_months_count",
+  "bank_months_count", "session_length_in_minutes",
+  "device_distinct_emails_8w"
+)
+
+#Este codigo convierte en valores nulos a los '-1'.
+datos_na <- df %>%
+  mutate(across(all_of(vars_missing_como_negativo), ~ na_if(., -1))) %>%
+  mutate(intended_balcon_amount = ifelse(intended_balcon_amount < 0, NA, intended_balcon_amount))
+rm(df)
+## % de missing por variable, solo las que tienen al menos 1
+missing_tabla <- datos_na %>%
+  summarise(across(everything(), ~ mean(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "pct_missing") %>%
+  filter(pct_missing > 0) %>%
+  arrange(desc(pct_missing))
+
+print(missing_tabla)
+
+ggplot(missing_tabla, aes(x = fct_reorder(variable, pct_missing), y = pct_missing)) +
+  geom_col(fill = "darkorange") +
+  geom_text(aes(label = scales::percent(pct_missing, accuracy = 0.1)), hjust = -0.1) +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.15))) +
+  labs(title = "Porcentaje de valores faltantes por variable",
+       subtitle = "Tras recodificar los codigos -1 / negativos como NA explicito",
+       x = NULL, y = "% faltante") +
+  theme_minimal()
+
+## Decision: dejo los NA como estan  porque woebin() los
+## trata como un bin propio - el hecho de "no informar" puede ser en si
+## mismo predictivo, y perderiamos esa señal si imputaramos un valor.
+
+rm(df,missing_tabla,tipos, vars_missing_como_negativo, balance)
+## ============================================================
+## DISTRIBUCIONES UNIVARIADAS (priorizadas por IV)
+## ============================================================
+## Usamos la tabla de IV ya calculada para no graficar las 30 variables
+## por igual - priorizamos las de mayor poder predictivo.
+
+top_iv_vars <- tabla_iv %>% arrange(desc(info_value)) %>% slice_head(n = 8) %>% pull(variable)
+print(top_iv_vars)
+
+## --- Variables categoricas (barras de frecuencia) ---
+vars_categoricas <- c("housing_status", "device_os", "employment_status", "payment_type")
+
+for (v in intersect(top_iv_vars, vars_categoricas)) {
+  p <- ggplot(datos_na, aes(x = fct_infreq(.data[[v]]))) +
+    geom_bar(fill = "steelblue") +
+    labs(title = paste("Distribucion de", v), x = NULL, y = "Cantidad") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))+
+    theme_minimal()
+  print(p)
+}
+
+## --- Variables numericas (densidad, con escala log donde hay cola larga) ---
+vars_numericas_sesgadas <- c("zip_count_4w", "credit_risk_score", "proposed_credit_limit")
+vars_numericas_normales <- c("current_address_months_count", "prev_address_months_count","income", "date_of_birth_distinct_emails_4w")
+
+for (v in intersect(top_iv_vars, vars_numericas_normales)) {
+  p <- ggplot(datos_na, aes(x = .data[[v]])) +
+    geom_histogram(bins = 20, fill = "steelblue", na.rm = TRUE) +
+    labs(title = paste("Distribucion de", v), x = v, y = "Cantidad") +
+    theme_minimal()
+  print(p)
+}
+
+for (v in intersect(top_iv_vars, vars_numericas_sesgadas)) {
+  p <- ggplot(datos_na, aes(x = .data[[v]])) +
+    geom_histogram(bins = 40, fill = "steelblue", na.rm = TRUE) +
+    geom_density() +
+    labs(title = paste("Distribucion de", v, "(sesgada, ver version log)"), x = v, y = "Cantidad") + 
+    theme_minimal()
+  print(p)
+}
+
+## ============================================================
+## 5. BIVARIADAS: relacion de cada variable con fraud_bool
+## ============================================================
+## Usamos woebin_plot(), que ya vimos antes: combina en un solo grafico
+## la distribucion de la variable (barras) y la tasa de fraude por bin
+## (linea) - exactamente la vista bivariada que interesa para elegir
+## variables, sin tener que armar el grafico a mano bin por bin.
+
+bins <- woebin(datos_na, y = "fraud_bool",
+               min_perc_fine_bin = 0.02, min_perc_coarse_bin = 0.05,
+               bin_num_limit = 8)
+## 5.1 - Panel combinado con las 8 variables de mayor IV
+## (evita el problema de que cada print() en un loop pise al anterior
+##  en el panel de Plots de RStudio - acá se arma UNA sola figura)
+graficos_bivariados <- woebin_plot(bins[top_iv_vars])
+
+wrap_plots(graficos_bivariados, ncol = 2) +
+  plot_annotation(title = "Relacion de las variables de mayor IV con fraud_bool")
+
+#Hago boxplots para las siguientes variables continuas:
+vars_continuas_top <- intersect(top_iv_vars, c("current_address_months_count","prev_address_months_count","customer_age", "credit_risk_score", "proposed_credit_limit","zip_count_4w", "income","date_of_birth_distinct_emails_4w"))
+
+graficos_boxplot <- lapply(vars_continuas_top, function(v) {
+  ggplot(datos_na, aes(x = factor(fraud_bool, labels = c("No fraude","Fraude")),
+                       y = .data[[v]], fill = factor(fraud_bool))) +
+    geom_boxplot(outlier.alpha = 0.15, show.legend = FALSE) +
+    scale_fill_manual(values = c("#4C72B0", "#C44E52")) +
+    labs(title = v, x = NULL, y = NULL)
+})
+names(graficos_boxplot) <- vars_continuas_top
+
+## ============================================================
+##    Split train/test estratificado
+##    test_final se evalua UNA SOLA VEZ, al final de todo
+##    Notese que aplico una division entre test y train estratificada
+##    para mantener la proporcion de fraude en el test y el train
+## ============================================================
+#Fijo una semilla
+set.seed(261395)
+
+#Tomo los indices de los registros fraudulentos como de los genuinos.
+idx_fraude <- which(datos_na$fraud_bool == 1)
+idx_no_fraude <-  which(datos_na$fraud_bool == 0)
+
+#Muestreo 70% dentro de cada grupo:
+#Agarro el 70# de los fraudes:
+idx_train_fraude    <- sample(idx_fraude,    size = 0.7 * length(idx_fraude))
+#Hago lo mismo con lo no fraude:
+idx_train_no_fraude <- sample(idx_no_fraude, size = 0.7 * length(idx_no_fraude))
+
+#Ahora si construyo ambos datasets:
+
+idx_train <-  c(idx_train_fraude, idx_train_no_fraude)
+
+#Ambos datasets contienen la misma proporcion de transacciones fraudulentas:
+train <- datos_na[idx_train,]
+#En el test va todo menos lo que fue a train:
+test  <- datos_na[-idx_train,]  
+
+prop.table(table(train$fraud_bool))
+prop.table(table(test$fraud_bool))
+
+#Ambos datasets tienen aproximadamente el 11% de fraude.
+rm(idx_fraude, idx_no_fraude, idx_train_fraude,idx_train,idx_train_no_fraude)
+## ============================================================
+## 2. Binning + WoE, ajustado con el dataset de train
+## ============================================================
+
+bins <- woebin(
+  train, y = "fraud_bool",
+  method = "tree",            
+  min_perc_fine_bin = 0.02,
+  min_perc_coarse_bin = 0.05,
+  bin_num_limit = 8
+)
+
+train_full_woe <- woebin_ply(train, bins)
+test_final_woe <- woebin_ply(test, bins)   # mismos bins aplicados a test
+tabla_iv <- iv(datos_na, y = "fraud_bool")
+print(tabla_iv[order(-tabla_iv$info_value), ])
+
+#Por cuestion de convencion elimino las variables con IV menor a 0.2, dado que ellas contribuyen poco a explicar la variable dependiente.
+
+train_full_woe <-  train_full_woe %>% select(-device_fraud_count, -velocity_24h_woe, -name_email_similarity_woe,-velocity_6h_woe, -velocity_4w_woe, -source_woe,-intended_balcon_amount_woe,-days_since_request_woe,-session_length_in_minutes_woe,- phone_mobile_valid_woe, -foreign_request_woe, device_distinct_emails_8w_woe, keep_alive_session_woe,device_distinct_emails_8w_woe)
+
+#Hago lo mismo con el testing:
+
+test_final_woe <- test_final_woe %>% select(-device_fraud_count, -velocity_24h_woe, -name_email_similarity_woe,-velocity_6h_woe, -velocity_4w_woe, -source_woe,-intended_balcon_amount_woe,-days_since_request_woe,-session_length_in_minutes_woe,- phone_mobile_valid_woe, -foreign_request_woe, device_distinct_emails_8w_woe,keep_alive_session_woe,device_distinct_emails_8w_woe)
+
+rm(train, test)
+## ============================================================
+## 3. Regresion logistica sobre variables transformadas a WoE
+## ============================================================
+
+modelo <- glm(fraud_bool ~ ., data = train_full_woe, family = binomial())
+summary(modelo)
+#Todas las variables son significativas
+
+## ============================================================
+## 4. Prediccion sobre test_final (dato nunca antes visto)
+## ============================================================
+
+pred_test <- predict(modelo, newdata = test_final_woe, type = "response")
+etiquetas_test <- test_final_woe$fraud_bool
+
+options(scipen = 999)
+df_prob <- data.frame(
+  probabilidad = pred_test, #Lo predicho por el modelo
+  Fraude = etiquetas_test  #Verdaderos valores que toma la variable
+)
+## ============================================================
+## 5. Curva y AUC de ROC
+## ============================================================
+
+roc_test <- roc(response = etiquetas_test, predictor = pred_test, quiet = TRUE)
+cat("AUC ROC:", round(as.numeric(auc(roc_test)), 4), "\n")
+
+roc_df <- data.frame(fpr = 1 - roc_test$specificities, tpr = roc_test$sensitivities)
+
+#Grafico la curva ROC:
+
+ggplot(roc_df, aes(x = fpr, y = tpr)) +
+  geom_line(color = "steelblue", linewidth = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "gray40") +
+  labs(title = "Curva ROC (test_final)",
+       subtitle = "Linea punteada = clasificador aleatorio",
+       x = "Tasa de falsos positivos (1 - especificidad)",
+       y = "Tasa de verdaderos positivos (sensibilidad)") +
+  theme_minimal()
+
+## ============================================================
+## 6. Curva y AUC de Precision-Recall
+## ============================================================
+
+pr_test <- pr.curve(
+  scores.class0 = pred_test[etiquetas_test == 1],  # scores de la clase positiva (fraude)
+  scores.class1 = pred_test[etiquetas_test == 0],  # scores de la clase negativa
+  curve = TRUE
+)
+cat("AUC PR :", round(pr_test$auc.integral, 4), "\n")
+
+pr_curve_df <- as.data.frame(pr_test$curve) |> setNames(c("recall", "precision", "threshold"))
+tasa_base <- mean(train_full_woe$fraud_bool)  # referencia = prevalencia de fraude
+
+ggplot(pr_curve_df, aes(x = recall, y = precision)) +
+  geom_line(color = "firebrick", linewidth = 1) +
+  geom_hline(yintercept = tasa_base, linetype = "dashed", color = "gray40") +
+  labs(title = "Curva Precision-Recall (test_final)",
+       subtitle = paste0("Linea punteada = clasificador aleatorio (prevalencia = ",
+                         round(tasa_base, 4), ")"),
+       x = "Recall", y = "Precision") +
+  theme_minimal()
+
+rm(tasa_base, top_iv_vars,v,vars_categoricas,vars_continuas_top, vars_numericas_normales,vars_numericas_sesgadas,calcular_metricas_umbral,guardar_graficos, etiquetas_test, g, metricas_test, p, umbral_fijo, balance, bins, cor_df, cor_matrix, datos_na, graficos_bivariados, graficos_boxplot, roc_test, pr_test, modelo, tabla_iv)
+## ============================================================
+## MATRIZ CONFUSION
+## ============================================================
+
+head(df_prob)
+#Clasificamos a aquellas observaciones que superan el clasico umbral de 0.5 como fraudulentas.
+
+
+#Quiero ver la distribucion de la probabilidad predicha:
+ggplot(
+  df_prob,
+  aes(
+    x = probabilidad,
+    fill = Fraude
+  )
+) +
+  
+  geom_histogram(
+    bins = 40,
+    alpha = 0.6,
+    position = "identity"
+  ) +
+  
+  geom_vline(
+    xintercept = 0.5,
+    linetype = "dashed",
+    color = "black",
+    linewidth = 1
+  ) +
+  
+  labs(
+    title = "Probabilidades predichas por el modelo",
+    subtitle = "La línea representa el umbral convencional de 0.5",
+    x = "Probabilidad predicha de default",
+    y = "Cantidad"
+  ) +
+  
+  theme_minimal(base_size = 13)
+#Notese que al ser tan desbalanceado el dataset casi no hay variables que superen el 0.5 de probabilidad.
+
+##Ahora si calculamos la matriz de confusion:
+
+clase_pred <- ifelse(
+  pred_test > 0.11, 1,0)
+##
+matriz_confusion <- table(
+  Predicho = clase_pred,
+  Real = test_final_woe$fraud_bool
+)
+
+print(matriz_confusion)
+
+
+#Utilizo la funcion para visualizar la matriz de confusion vista en clase:
+
+graficar_matriz_confusion <- function(
+    tabla,
+    titulo
+) {
+  
+  df <- as.data.frame(tabla)
+  
+  ggplot(
+    df,
+    aes(
+      x = Real,
+      y = Predicho,
+      fill = Freq
+    )
+  ) +
+    
+    geom_tile(
+      color = "white"
+    ) +
+    
+    geom_text(
+      aes(
+        label = Freq
+      ),
+      size = 7,
+      fontface = "bold"
+    ) +
+    
+    scale_fill_gradient(
+      low = "white",
+      high = "steelblue"
+    ) +
+    
+    labs(
+      title = titulo,
+      x = "Clase real",
+      y = "Clase predicha",
+      fill = "Casos"
+    ) +
+    
+    theme_minimal(
+      base_size = 13
+    )
+}
+
+##Ahora si visualizo:
+
+graficar_matriz_confusion(
+  matriz_confusion,
+  "Matriz de confusión — Logit"
+)
+
+# ============================================================
+#  MÉTRICAS
+# ============================================================
+
+calcular_metricas <- function(tabla) {
+  
+  VP <- tabla["1", "1"]
+  FP <- tabla["1", "0"]
+  
+  VN <- tabla["0", "0"]
+  FN <- tabla["0", "1"]
+  
+  accuracy <- (VP + VN) / sum(tabla)
+  precision <- VP / (VP + FP)
+  sensibilidad <- VP / (VP + FN)
+  especificidad <- VN / (VN + FP)
+  f1 <- 2 * precision * sensibilidad / (precision + sensibilidad)
+  balanced_accuracy <- (sensibilidad + especificidad) / 2
+  
+  data.frame(
+    Accuracy = accuracy,
+    Precision = precision,
+    Sensibilidad = sensibilidad,
+    Especificidad = especificidad,
+    F1 = f1,
+    Balanced_Accuracy = balanced_accuracy
+  )
+}
+
+metricas_originales <- calcular_metricas(matriz_confusion)
+
+print(metricas_originales)
+
+
+#Ahora quiero ver cual es el umbral que maximiza el F1 score
+
+# ============================================================
+# 8.1 F1 SEGÚN EL UMBRAL
+# ============================================================
+
+umbrales <- seq(
+  0.01,
+  0.99,
+  by = 0.01
+)
+
+?sapply 
+#Esta ultima funcion lo que hace es aplicar a un vector una funcion.
+f1_por_umbral <- sapply(
+  umbrales,
+  function(u) {
+    
+    pred_u <- ifelse(pred_test > u, 1, 0)
+    
+    tab_u <- table(
+      factor(pred_u, levels = c(0, 1)),
+      factor(test_final_woe$fraud_bool, levels = c(0, 1))
+    )
+    
+    # Posicion 1 = nivel "0" ; Posicion 2 = nivel "1" (para fila Y columna)
+    VN <- tab_u[1, 1]
+    FP <- tab_u[2, 1]
+    FN <- tab_u[1, 2]
+    VP <- tab_u[2, 2]
+    
+    precision <- ifelse(VP + FP == 0, 0, VP / (VP + FP))
+    recall    <- ifelse(VP + FN == 0, 0, VP / (VP + FN))
+    
+    ifelse(precision + recall == 0, 0,
+           2 * precision * recall / (precision + recall))
+  }
+)
+
+df_umbrales <- data.frame(umbral = umbrales, F1 = f1_por_umbral)
+
+umbral_optimo <- df_umbrales$umbral[
+  which.max(df_umbrales$F1)
+]
+
+#El umbral optimo es 0.11.
+rm(df_umbrales, metricas_originales, pr_curve_df, roc_df, f1_por_umbral, umbral_optimo, umbrales, calcular_metricas, graficar_matriz_confusion, matriz_confusion)
+
+#Por ultimo quiero ver si implementando undersampling las estimaciones mejoran. Para eso primeramente separamos las clases:
+
+train_yes <- train_full_woe %>% filter(fraud_bool == 1)
+train_no <- train_full_woe %>%  filter(fraud_bool == 0)
+
+# ============================================================
+# 9.1 UNDERSAMPLING
+# ============================================================
+
+#Extraigo una muestra de las cuentas genuinas del tamanio de la cantidad de cuentas fraudulentas en el training:
+train_no_under <- train_no %>%
+  slice(sample(1:nrow(train_no), size = nrow(train_yes)))
+
+#Ahora combino las dos bases:
+train_undersampling <- rbind(train_no_under, train_yes)
+#Ahora tengo una base compuesta por 50% de cuentas fraudulentas y 50% de cuentas genuinas:
+table(
+  train_undersampling$fraud_bool
+)
+
+
+#Ahora le aplico el modelo a esta nueva base:
+modelo_under <- glm(
+  fraud_bool ~ .,
+  data = train_undersampling,
+  family = binomial
+)
+
+summary(modelo_under)
+#Modelo original:
+
+modelo_original <-  glm(
+  fraud_bool ~ .,
+  data = train_full_woe,
+  family = binomial)
+
+#Ahora comparo ambos modelos:
+
+pred_original <- predict(modelo_original, test_final_woe, type = 'response')
+pred_under <-  predict(modelo_under, test_final_woe, type = 'response')
+
+roc_under <- roc(
+  test_final_woe$fraud_bool,
+  pred_under,
+  levels = c(0, 1),
+  direction = "<"
+)
+
+roc_original <- roc(
+  test_final_woe$fraud_bool,
+  pred_original,
+  levels = c(0, 1),
+  direction = "<"
+)
+
+#Comparo ambos:
+
+cat(
+  "AUC original:       ",
+  round(auc(roc_original), 3),
+  "\n"
+)
+
+cat(
+  "AUC undersampling:  ",
+  round(auc(roc_under), 3),
+  "\n"
+)
+#Mejora solo en 0.001. 
+#Grafico conjuntamente ambas curvas:
+plot(
+  roc_original,
+  col = "steelblue",
+  lwd = 2,
+  main = "ROC: original vs. remuestreo"
+)
+
+lines(
+  roc_under,
+  col = "firebrick",
+  lwd = 2
+)
+
+legend(
+  "bottomright",
+  legend = c(
+    paste("Original:", round(auc(roc_original), 3)),
+    paste("Undersampling:", round(auc(roc_under), 3))
+  ),
+  col = c("steelblue", "firebrick"),
+  lwd = 2
+)
+  
